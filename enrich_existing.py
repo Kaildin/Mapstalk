@@ -26,21 +26,22 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional
 
-# Importa le funzioni di arricchimento
-from src.scraper import (
-    _extract_emails_from_website,
-    _filter_valid_emails,
-    _is_big_company,
+# Importa le funzioni di arricchimento locale
+from src.email_utils import (
+    extract_emails_from_website,
+    filter_valid_emails,
+    is_big_company,
+    WebsiteRelevanceAnalyzer,
 )
+from src.search_utils import ddg_search_improved, extract_admin_with_deepseek
 
-try:
-    from outreach_saas.analysis.relevance_analyzer import WebsiteRelevanceAnalyzer
-    from outreach_saas.scraping.ddg_search_improved import ddg_search_improved
-    from outreach_saas.scraping.deepseek_extractor import extract_admin_with_deepseek
-    OUTREACH_AVAILABLE = True
-except ImportError as e:
-    OUTREACH_AVAILABLE = False
-    logging.warning(f"Outreach SaaS modules not available: {e}. Admin search disabled.")
+# Flag per indicare che i moduli local sono disponibili
+OUTREACH_AVAILABLE = True
+
+# Alias per compatibilita con il codice esistente
+_extract_emails_from_website = extract_emails_from_website
+_filter_valid_emails = filter_valid_emails
+_is_big_company = is_big_company
 
 # Configura logging
 logging.basicConfig(
@@ -101,8 +102,8 @@ def enrich_row(row: Dict, industry: str, skip_admin: bool = False) -> Dict:
     
     # --- 1. Estrazione email ---
     try:
-        emails = _extract_emails_from_website(website)
-        filtered_emails = _filter_valid_emails(emails)
+        emails = extract_emails_from_website(website)
+        filtered_emails = filter_valid_emails(emails)
         if filtered_emails:
             row["email"] = ", ".join(filtered_emails)
             logger.info(f"Email trovate per {nome}: {len(filtered_emails)}")
@@ -114,17 +115,12 @@ def enrich_row(row: Dict, industry: str, skip_admin: bool = False) -> Dict:
     
     # --- 2. Analisi pertinenza ---
     try:
-        if OUTREACH_AVAILABLE:
-            analyzer = WebsiteRelevanceAnalyzer(industry=industry)
-            analysis = analyzer.analyze_website_relevance(website)
-            row["pertinenza"] = analysis.get("is_relevant", False)
-            row["categoria"] = analysis.get("category", "Sconosciuto")
-            row["confidenza_analisi"] = analysis.get("confidence", 0.0)
-            logger.info(f"Pertinenza per {nome}: {row['pertinenza']} (categoria: {row['categoria']})")
-        else:
-            row["pertinenza"] = False
-            row["categoria"] = "Sconosciuto"
-            row["confidenza_analisi"] = 0.0
+        analyzer = WebsiteRelevanceAnalyzer(industry=industry)
+        analysis = analyzer.analyze_website_relevance(website)
+        row["pertinenza"] = analysis.get("is_relevant", False)
+        row["categoria"] = analysis.get("category", "Sconosciuto")
+        row["confidenza_analisi"] = analysis.get("confidence", 0.0)
+        logger.info(f"Pertinenza per {nome}: {row['pertinenza']} (categoria: {row['categoria']})")
     except Exception as e:
         logger.error(f"Errore analisi pertinenza per {nome}: {e}")
         row["pertinenza"] = False
@@ -132,7 +128,7 @@ def enrich_row(row: Dict, industry: str, skip_admin: bool = False) -> Dict:
         row["confidenza_analisi"] = 0.0
     
     # --- 3. Ricerca admin (opzionale) ---
-    if not skip_admin and OUTREACH_AVAILABLE:
+    if not skip_admin:
         try:
             query = f"{nome} amministratore"
             ddg_results = ddg_search_improved(query, max_results=5)

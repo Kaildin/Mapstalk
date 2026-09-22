@@ -18,24 +18,20 @@ from .website_checker import get_website_status, website_is_real
 from .driver_utils import cleanup_chrome_tmp
 from .text_utils import clean_extracted_text
 
-# Import outreach_saas modules for advanced features
-try:
-    from outreach_saas.config.definitions import (
-        INDUSTRY_CONFIG, 
-        KEYWORDS_BY_INDUSTRY, 
-        BIG_COMPANY_KEYWORDS,
-        IGNORED_EMAIL_DOMAINS,
-        LOCAL_PART_IGNORE_PATTERNS
-    )
-    from outreach_saas.analysis.relevance_analyzer import WebsiteRelevanceAnalyzer
-    from outreach_saas.scraping.ddg_search_improved import ddg_search_improved
-    from outreach_saas.scraping.deepseek_extractor import extract_admin_with_deepseek
-    OUTREACH_AVAILABLE = True
-except ImportError as e:
-    OUTREACH_AVAILABLE = False
-    logger.warning(f"Outreach SaaS modules not available: {e}. Advanced features disabled.")
-
+# Define logger BEFORE any try/except that might use it
 logger = logging.getLogger(__name__)
+
+# Import local modules for email extraction and analysis
+from .email_utils import (
+    BIG_COMPANY_KEYWORDS,
+    IGNORED_EMAIL_DOMAINS,
+    LOCAL_PART_IGNORE_PATTERNS,
+    WebsiteRelevanceAnalyzer,
+)
+from .search_utils import ddg_search_improved, extract_admin_with_deepseek
+
+# Flag to indicate local implementations are available
+OUTREACH_AVAILABLE = True
 
 CSV_FIELDNAMES = [
     "city", "state", "keyword", "nome", "indirizzo", "telefono",
@@ -242,50 +238,20 @@ def _extract_emails_from_website(url: str, timeout: int = 10) -> List[str]:
 
 def _filter_valid_emails(emails: List[str]) -> List[str]:
     """Filtra email valide escludendo domini ignorati e pattern indesiderati."""
-    valid_emails = []
-    
-    for email in emails:
-        if not email or '@' not in email:
-            continue
-        
-        try:
-            domain = email.split('@')[1].lower()
-            local_part = email.split('@')[0].lower()
-            
-            # Check ignored domains
-            if domain in IGNORED_EMAIL_DOMAINS:
-                logger.debug(f"Email scartata - dominio ignorato: {email}")
-                continue
-            
-            # Check local part patterns
-            if any(pattern.match(local_part) for pattern in LOCAL_PART_IGNORE_PATTERNS):
-                logger.debug(f"Email scartata - local part pattern: {email}")
-                continue
-            
-            # Check for disposable email domains
-            disposable_domains = ['mailinator.com', 'tempmail.com', 'guerrillamail.com']
-            if domain in disposable_domains:
-                logger.debug(f"Email scartata - dominio temporaneo: {email}")
-                continue
-            
-            valid_emails.append(email)
-        except Exception:
-            continue
-    
-    return valid_emails
+    from .email_utils import filter_valid_emails
+    return filter_valid_emails(emails)
 
 
 def _is_big_company(name: str) -> bool:
     """Check if company name contains big company keywords."""
-    if not name:
-        return False
-    name_lower = name.lower()
-    return any(kw in name_lower for kw in BIG_COMPANY_KEYWORDS)
+    from .email_utils import is_big_company
+    return is_big_company(name)
 
 
 def _get_industry_keywords(industry: str) -> List[str]:
     """Get keywords for a specific industry."""
-    return KEYWORDS_BY_INDUSTRY.get(industry, [])
+    # Local implementation - return empty list as we use the analyzer directly
+    return []
 
 
 def search_contractors(
