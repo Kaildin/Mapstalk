@@ -167,9 +167,10 @@ def enrich_row(row: Dict, industry: str, skip_admin: bool = False) -> Dict:
 
 
 def process_batch(rows: List[Dict], industry: str, skip_admin: bool = False, 
-                 max_workers: int = 5) -> List[Dict]:
-    """Processa un batch di righe in parallelo"""
+                 max_workers: int = 5, output_path: str = None, batch_size: int = 10) -> List[Dict]:
+    """Processa un batch di righe in parallelo con salvataggio incrementale"""
     enriched_rows = []
+    total_rows = len(rows)
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -177,10 +178,18 @@ def process_batch(rows: List[Dict], industry: str, skip_admin: bool = False,
             for idx, row in enumerate(rows)
         }
         
+        processed_count = 0
         for future in as_completed(futures):
             try:
                 enriched_row = future.result()
                 enriched_rows.append(enriched_row)
+                processed_count += 1
+                
+                # Salva incrementalmente ogni batch_size righe
+                if output_path and batch_size > 0 and processed_count % batch_size == 0:
+                    save_enriched_csv(enriched_rows.copy(), output_path)
+                    logger.info(f"[Salvataggio incrementale] {processed_count}/{total_rows} righe salvate")
+                    
             except Exception as e:
                 logger.error(f"Errore nel processing parallelo: {e}")
     
@@ -254,11 +263,14 @@ def main():
         existing_rows, 
         industry=args.industry, 
         skip_admin=args.skip_admin,
-        max_workers=args.max_workers
+        max_workers=args.max_workers,
+        output_path=args.output,
+        batch_size=10  # Salva ogni 10 righe
     )
     
-    # Salva risultato
-    save_enriched_csv(enriched_rows, args.output)
+    # Salva risultato finale
+    if enriched_rows:
+        save_enriched_csv(enriched_rows, args.output)
     
     elapsed = time.time() - start_time
     logger.info("=" * 60)
