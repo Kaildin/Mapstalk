@@ -19,8 +19,10 @@ Opzioni:
 """
 
 import argparse
+import asyncio
 import csv
 import logging
+import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -34,6 +36,14 @@ from src.email_utils import (
     WebsiteRelevanceAnalyzer,
 )
 from src.search_utils import ddg_search_improved, extract_admin_with_deepseek
+
+# Import Mistral analyzer (optional - will be used if API key is provided)
+MISTRAL_AVAILABLE = False
+try:
+    from src.mistral_analyzer import MistralWebsiteAnalyzer
+    MISTRAL_AVAILABLE = True
+except ImportError:
+    pass
 
 # Flag per indicare che i moduli local sono disponibili
 OUTREACH_AVAILABLE = True
@@ -79,7 +89,8 @@ def load_existing_csv(input_path: str) -> List[Dict]:
     return rows
 
 
-def enrich_row(row: Dict, industry: str, skip_admin: bool = False) -> Dict:
+def enrich_row(row: Dict, industry: str, skip_admin: bool = False, 
+               mistral_api_key: Optional[str] = None) -> Dict:
     """Arricchisce una singola riga con email, pertinenza e admin"""
     nome = row.get("nome", row.get("name", "")).strip()
     website = (row.get("sito_web") or row.get("website") or "").strip()
@@ -115,12 +126,30 @@ def enrich_row(row: Dict, industry: str, skip_admin: bool = False) -> Dict:
     
     # --- 2. Analisi pertinenza ---
     try:
-        analyzer = WebsiteRelevanceAnalyzer(industry=industry)
-        analysis = analyzer.analyze_website_relevance(website)
-        row["pertinenza"] = analysis.get("is_relevant", False)
-        row["categoria"] = analysis.get("category", "Sconosciuto")
-        row["confidenza_analisi"] = analysis.get("confidence", 0.0)
-        logger.info(f"Pertinenza per {nome}: {row['pertinenza']} (categoria: {row['categoria']})")
+        if mistral_api_key and MISTRAL_AVAILABLE:
+            # Use Mistral API for analysis
+            logger.info(f"Usando Mistral API per analisi pertinenza di {nome}")
+            mistral_analyzer = MistralWebsiteAnalyzer(
+                api_key=mistral_api_key,
+                industry=industry,
+                model="mistral-tiny",
+                max_content_length=10000
+            )
+            analysis_result = asyncio.run(
+                mistral_analyzer.analyze_website_async(website)
+            )
+            row["pertinenza"] = analysis_result.is_relevant
+            row["categoria"] = analysis_result.category
+            row["confidenza_analisi"] = analysis_result.confidence
+            logger.info(f"Pertinenza Mistral per {nome}: {row['pertinenza']} (categoria: {row['categoria']})")
+        else:
+            # Use local keyword-based analyzer
+            analyzer = WebsiteRelevanceAnalyzer(industry=industry)
+            analysis = analyzer.analyze_website_relevance(website)
+            row["pertinenza"] = analysis.get("is_relevant", False)
+            row["categoria"] = analysis.get("category", "Sconosciuto")
+            row["confidenza_analisi"] = analysis.get("confidence", 0.0)
+            logger.info(f"Pertinenza per {nome}: {row['pertinenza']} (categoria: {row['categoria']})")
     except Exception as e:
         logger.error(f"Errore analisi pertinenza per {nome}: {e}")
         row["pertinenza"] = False
@@ -167,14 +196,15 @@ def enrich_row(row: Dict, industry: str, skip_admin: bool = False) -> Dict:
 
 
 def process_batch(rows: List[Dict], industry: str, skip_admin: bool = False, 
-                 max_workers: int = 5, output_path: str = None, batch_size: int = 10) -> List[Dict]:
+                 max_workers: int = 5, output_path: str = None, batch_size: int = 10,
+                 mistral_api_key: Optional[str] = None) -> List[Dict]:
     """Processa un batch di righe in parallelo con salvataggio incrementale"""
     enriched_rows = []
     total_rows = len(rows)
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(enrich_row, row, industry, skip_admin): idx 
+            executor.submit(enrich_row, row, industry, skip_admin, mistral_api_key): idx 
             for idx, row in enumerate(rows)
         }
         
@@ -235,8 +265,15 @@ def main():
                        help='Salta la ricerca admin via DeepSeek')
     parser.add_argument('--max-workers', type=int, default=5,
                        help='Numero massimo di thread (default: 5)')
+    parser.add_argument('--mistral-api-key', type=str, default=None,
+                       help='Chiave API Mistral per analisi avanzata (opzionale)')
+    parser.add_argument('--use-mistral', action='store_true',
+                       help='Usa Mistral API invece dell\'analizzatore locale')
     
     args = parser.parse_args()
+    
+    # Get Mistral API key from argument or environment
+    mistral_api_key = args.mistral_api_key or os.getenv('MISTRAL_API_KEY')
     
     logger.info("=" * 60)
     logger.info("ARRICCHIMENTO CSV ESISTENTE")
@@ -246,6 +283,9 @@ def main():
     logger.info(f"Industry: {args.industry}")
     logger.info(f"Skip admin: {args.skip_admin}")
     logger.info(f"Max workers: {args.max_workers}")
+    logger.info(f"Usa Mistral API: {mistral_api_key is not None and args.use_mistral}")
+    if mistral_api_key and args.use_mistral and not MISTRAL_AVAILABLE:
+        logger.warning("Mistral analyzer not available, falling back to local analyzer")
     logger.info("=" * 60)
     
     start_time = time.time()
@@ -257,6 +297,9 @@ def main():
         logger.error("Nessuna riga caricata. Verifica il file di input.")
         return
     
+    # Determine if we should use Mistral
+    use_mistral = (mistral_api_key is not None and args.use_mistral and MISTRAL_AVAILABLE)
+    
     # Arricchisci in parallelo
     logger.info(f"Arricchimento di {len(existing_rows)} righe...")
     enriched_rows = process_batch(
@@ -265,7 +308,8 @@ def main():
         skip_admin=args.skip_admin,
         max_workers=args.max_workers,
         output_path=args.output,
-        batch_size=10  # Salva ogni 10 righe
+        batch_size=10,  # Salva ogni 10 righe
+        mistral_api_key=mistral_api_key if use_mistral else None
     )
     
     # Salva risultato finale
