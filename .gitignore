@@ -10,3 +10,4 @@ debug/
 .venv/
 input/
 .vscode/
+generate_categories_json.py
