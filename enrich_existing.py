@@ -1,0 +1,329 @@
+"""
+Script di arricchimento per CSV esistenti.
+
+Aggiunge email, pertinenza, categoria, confidenza e contatto (admin)
+a un CSV già processato con il vecchio local-contractors.
+
+Utilizzo:
+    python enrich_existing.py \
+        --input output/aziende_esistenti.csv \
+        --output output/aziende_arricchite.csv \
+        --industry fotovoltaico
+
+Opzioni:
+    --input      Percorso del CSV di input (obbligatorio)
+    --output     Percorso del CSV di output (default: output/aziende_arricchite.csv)
+    --industry   Settore per l'analisi di pertinenza (default: fotovoltaico)
+    --skip-admin Salta la ricerca admin via DeepSeek (più veloce, senza API)
+    --max-workers Numero massimo di thread per il parallelismo (default: 5)
+"""
+
+import argparse
+import asyncio
+import csv
+import logging
+import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Dict, List, Optional
+
+# Importa le funzioni di arricchimento locale
+from src.email_utils import (
+    extract_emails_from_website,
+    filter_valid_emails,
+    is_big_company,
+    WebsiteRelevanceAnalyzer,
+)
+from src.search_utils import ddg_search_improved, extract_admin_with_deepseek
+
+# Import Mistral analyzer (optional - will be used if API key is provided)
+MISTRAL_AVAILABLE = False
+try:
+    from src.mistral_analyzer import MistralWebsiteAnalyzer
+    MISTRAL_AVAILABLE = True
+except ImportError:
+    pass
+
+# Flag per indicare che i moduli local sono disponibili
+OUTREACH_AVAILABLE = True
+
+# Alias per compatibilita con il codice esistente
+_extract_emails_from_website = extract_emails_from_website
+_filter_valid_emails = filter_valid_emails
+_is_big_company = is_big_company
+
+# Configura logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    handlers=[
+        logging.FileHandler("enrich_existing.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Campi aggiuntivi per il CSV arricchito
+NEW_FIELDS = ["email", "linkedin", "pertinenza", "categoria", "confidenza_analisi", "contatto"]
+
+
+def load_existing_csv(input_path: str) -> List[Dict]:
+    """Carica il CSV esistente"""
+    rows = []
+    path = Path(input_path)
+    
+    if not path.exists():
+        logger.error(f"File non trovato: {input_path}")
+        return rows
+    
+    try:
+        with open(path, newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                rows.append(row)
+        logger.info(f"Caricate {len(rows)} righe da {input_path}")
+    except Exception as e:
+        logger.error(f"Errore lettura CSV: {e}")
+    
+    return rows
+
+
+def enrich_row(row: Dict, industry: str, skip_admin: bool = False, 
+               mistral_api_key: Optional[str] = None) -> Dict:
+    """Arricchisce una singola riga con email, pertinenza e admin"""
+    nome = row.get("nome", row.get("name", "")).strip()
+    website = (row.get("sito_web") or row.get("website") or "").strip()
+    
+    # Salta se non c'è il sito web
+    if not website:
+        logger.debug(f"Nessun sito web per {nome}, salto arricchimento")
+        for field in NEW_FIELDS:
+            if field not in row:
+                row[field] = ""
+        return row
+    
+    # Salta grandi aziende
+    if _is_big_company(nome):
+        logger.info(f"Saltata grande impresa: {nome}")
+        for field in NEW_FIELDS:
+            if field not in row:
+                row[field] = ""
+        return row
+    
+    # --- 1. Estrazione email ---
+    try:
+        emails = extract_emails_from_website(website)
+        filtered_emails = filter_valid_emails(emails)
+        if filtered_emails:
+            row["email"] = ", ".join(filtered_emails)
+            logger.info(f"Email trovate per {nome}: {len(filtered_emails)}")
+        else:
+            row["email"] = ""
+    except Exception as e:
+        logger.error(f"Errore estrazione email per {nome}: {e}")
+        row["email"] = ""
+    
+    # --- 2. Analisi pertinenza ---
+    try:
+        if mistral_api_key and MISTRAL_AVAILABLE:
+            # Use Mistral API for analysis
+            logger.info(f"Usando Mistral API per analisi pertinenza di {nome}")
+            mistral_analyzer = MistralWebsiteAnalyzer(
+                api_key=mistral_api_key,
+                industry=industry,
+                model="mistral-tiny",
+                max_content_length=10000
+            )
+            analysis_result = asyncio.run(
+                mistral_analyzer.analyze_website_async(website)
+            )
+            row["pertinenza"] = analysis_result.is_relevant
+            row["categoria"] = analysis_result.category
+            row["confidenza_analisi"] = analysis_result.confidence
+            logger.info(f"Pertinenza Mistral per {nome}: {row['pertinenza']} (categoria: {row['categoria']})")
+        else:
+            # Use local keyword-based analyzer
+            analyzer = WebsiteRelevanceAnalyzer(industry=industry)
+            analysis = analyzer.analyze_website_relevance(website)
+            row["pertinenza"] = analysis.get("is_relevant", False)
+            row["categoria"] = analysis.get("category", "Sconosciuto")
+            row["confidenza_analisi"] = analysis.get("confidence", 0.0)
+            logger.info(f"Pertinenza per {nome}: {row['pertinenza']} (categoria: {row['categoria']})")
+    except Exception as e:
+        logger.error(f"Errore analisi pertinenza per {nome}: {e}")
+        row["pertinenza"] = False
+        row["categoria"] = "Sconosciuto"
+        row["confidenza_analisi"] = 0.0
+    
+    # --- 3. Ricerca admin (opzionale) ---
+    if not skip_admin:
+        try:
+            query = f"{nome} amministratore"
+            ddg_results = ddg_search_improved(query, max_results=5)
+            if ddg_results:
+                payload = f"AZIENDA: {nome}\nQUERY: {query}\n\nRISULTATI (DuckDuckGo):\n"
+                for i, item in enumerate(ddg_results[:5], 1):
+                    payload += (
+                        f"\n[{i}] TITOLO: {item.get('title', '')}\n"
+                        f"[{i}] SNIPPET: {item.get('snippet', '')}\n"
+                        f"[{i}] URL: {item.get('url', '')}"
+                    )
+                
+                admin_name = extract_admin_with_deepseek(payload)
+                if admin_name:
+                    row["contatto"] = admin_name
+                    logger.info(f"Admin trovato per {nome}: {admin_name}")
+                else:
+                    row["contatto"] = ""
+            else:
+                row["contatto"] = ""
+        except Exception as e:
+            logger.error(f"Errore ricerca admin per {nome}: {e}")
+            row["contatto"] = ""
+    else:
+        row["contatto"] = ""
+    
+    # Inizializza campi linkedin vuoti
+    if "linkedin" not in row:
+        row["linkedin"] = ""
+    
+    # Inizializza industry se non presente
+    if "industry" not in row:
+        row["industry"] = industry
+    
+    return row
+
+
+def process_batch(rows: List[Dict], industry: str, skip_admin: bool = False, 
+                 max_workers: int = 5, output_path: str = None, batch_size: int = 10,
+                 mistral_api_key: Optional[str] = None) -> List[Dict]:
+    """Processa un batch di righe in parallelo con salvataggio incrementale"""
+    enriched_rows = []
+    total_rows = len(rows)
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(enrich_row, row, industry, skip_admin, mistral_api_key): idx 
+            for idx, row in enumerate(rows)
+        }
+        
+        processed_count = 0
+        for future in as_completed(futures):
+            try:
+                enriched_row = future.result()
+                enriched_rows.append(enriched_row)
+                processed_count += 1
+                
+                # Salva incrementalmente ogni batch_size righe
+                if output_path and batch_size > 0 and processed_count % batch_size == 0:
+                    save_enriched_csv(enriched_rows.copy(), output_path)
+                    logger.info(f"[Salvataggio incrementale] {processed_count}/{total_rows} righe salvate")
+                    
+            except Exception as e:
+                logger.error(f"Errore nel processing parallelo: {e}")
+    
+    return enriched_rows
+
+
+def save_enriched_csv(rows: List[Dict], output_path: str):
+    """Salva il CSV arricchito"""
+    if not rows:
+        logger.warning("Nessuna riga da salvare")
+        return
+    
+    # Determina tutti i fieldnames
+    fieldnames = set()
+    for row in rows:
+        fieldnames.update(row.keys())
+    fieldnames = sorted(fieldnames)
+    
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    
+    try:
+        with open(path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+            writer.writeheader()
+            writer.writerows(rows)
+        logger.info(f"Salvato CSV arricchito: {output_path}")
+    except Exception as e:
+        logger.error(f"Errore salvataggio CSV: {e}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Arricchisce un CSV esistente con email, pertinenza e admin"
+    )
+    parser.add_argument('--input', type=str, required=True, 
+                       help='Percorso del CSV di input (obbligatorio)')
+    parser.add_argument('--output', type=str, default='output/aziende_arricchite.csv',
+                       help='Percorso del CSV di output')
+    parser.add_argument('--industry', type=str, default='fotovoltaico',
+                       help='Settore per l\'analisi di pertinenza (default: fotovoltaico)')
+    parser.add_argument('--skip-admin', action='store_true',
+                       help='Salta la ricerca admin via DeepSeek')
+    parser.add_argument('--max-workers', type=int, default=5,
+                       help='Numero massimo di thread (default: 5)')
+    parser.add_argument('--mistral-api-key', type=str, default=None,
+                       help='Chiave API Mistral per analisi avanzata (opzionale)')
+    parser.add_argument('--use-mistral', action='store_true',
+                       help='Usa Mistral API invece dell\'analizzatore locale')
+    
+    args = parser.parse_args()
+    
+    # Get Mistral API key from argument or environment
+    mistral_api_key = args.mistral_api_key or os.getenv('MISTRAL_API_KEY')
+    
+    logger.info("=" * 60)
+    logger.info("ARRICCHIMENTO CSV ESISTENTE")
+    logger.info("=" * 60)
+    logger.info(f"Input: {args.input}")
+    logger.info(f"Output: {args.output}")
+    logger.info(f"Industry: {args.industry}")
+    logger.info(f"Skip admin: {args.skip_admin}")
+    logger.info(f"Max workers: {args.max_workers}")
+    logger.info(f"Usa Mistral API: {mistral_api_key is not None and args.use_mistral}")
+    if mistral_api_key and args.use_mistral and not MISTRAL_AVAILABLE:
+        logger.warning("Mistral analyzer not available, falling back to local analyzer")
+    logger.info("=" * 60)
+    
+    start_time = time.time()
+    
+    # Carica dati esistenti
+    existing_rows = load_existing_csv(args.input)
+    
+    if not existing_rows:
+        logger.error("Nessuna riga caricata. Verifica il file di input.")
+        return
+    
+    # Determine if we should use Mistral
+    use_mistral = (mistral_api_key is not None and args.use_mistral and MISTRAL_AVAILABLE)
+    
+    # Arricchisci in parallelo
+    logger.info(f"Arricchimento di {len(existing_rows)} righe...")
+    enriched_rows = process_batch(
+        existing_rows, 
+        industry=args.industry, 
+        skip_admin=args.skip_admin,
+        max_workers=args.max_workers,
+        output_path=args.output,
+        batch_size=10,  # Salva ogni 10 righe
+        mistral_api_key=mistral_api_key if use_mistral else None
+    )
+    
+    # Salva risultato finale
+    if enriched_rows:
+        save_enriched_csv(enriched_rows, args.output)
+    
+    elapsed = time.time() - start_time
+    logger.info("=" * 60)
+    logger.info("ARRICCHIMENTO COMPLETATO")
+    logger.info("=" * 60)
+    logger.info(f"Tempo impiegato: {elapsed:.1f}s ({elapsed/60:.1f} min)")
+    logger.info(f"Righe processate: {len(enriched_rows)}")
+    logger.info(f"Output: {args.output}")
+
+
+if __name__ == "__main__":
+    main()

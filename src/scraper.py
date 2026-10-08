@@ -2,9 +2,13 @@ import json
 import logging
 import csv
 import os
+import re
+import time
 import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+from urllib.parse import urlparse
+import requests
 
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
@@ -12,13 +16,43 @@ from geopy.extra.rate_limiter import RateLimiter
 from .selenium_scraper import scrape_with_selenium
 from .website_checker import get_website_status, website_is_real
 from .driver_utils import cleanup_chrome_tmp
+from .text_utils import clean_extracted_text
 
+# Define logger BEFORE any try/except that might use it
 logger = logging.getLogger(__name__)
+
+# Import local modules for email extraction and analysis
+from .email_utils import (
+    BIG_COMPANY_KEYWORDS,
+    IGNORED_EMAIL_DOMAINS,
+    LOCAL_PART_IGNORE_PATTERNS,
+    WebsiteRelevanceAnalyzer,
+)
+from .search_utils import ddg_search_improved, extract_admin_with_deepseek
+
+# Flag to indicate local implementations are available
+OUTREACH_AVAILABLE = True
 
 CSV_FIELDNAMES = [
     "city", "state", "keyword", "nome", "indirizzo", "telefono",
     "sito_web", "ha_sito_web", "website_status_code", "website_check_reason",
     "num_recensioni", "maps_url",
+]
+
+# Extended fieldnames for enriched output
+EXTENDED_CSV_FIELDNAMES = CSV_FIELDNAMES + [
+    "email",
+    "linkedin", 
+    "pertinenza",
+    "categoria",
+    "confidenza_analisi",
+    "contatto",
+    "industry",
+]
+
+EMAIL_PATTERNS = [
+    r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b',
+    r'mailto:\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b'
 ]
 
 _GEOCODE_CACHE_PATH = "debug/geocode_cache.json"
@@ -105,6 +139,21 @@ def _append_lead_to_csv(output_csv: str, row: Dict[str, Any]):
         logger.error(f"[Salvataggio incrementale] Errore: {e}")
 
 
+def _append_lead_to_extended_csv(output_csv: str, row: Dict[str, Any]):
+    """Append to extended CSV with all fields including email, relevance, etc."""
+    path = Path(output_csv)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    file_exists = path.exists() and path.stat().st_size > 0
+    try:
+        with open(path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=EXTENDED_CSV_FIELDNAMES, extrasaction="ignore")
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+    except Exception as e:
+        logger.error(f"[Salvataggio incrementale esteso] Errore: {e}")
+
+
 def build_search_urls(
     cities: List[str],
     keywords: List[str],
@@ -143,6 +192,68 @@ def build_search_urls(
     return search_urls
 
 
+def _extract_emails_from_text(text: str) -> List[str]:
+    """Estrae email da testo usando regex patterns."""
+    emails = []
+    if not text:
+        return emails
+    
+    for pattern in EMAIL_PATTERNS:
+        try:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            for match in matches:
+                email = match.strip().lower()
+                if email and email not in emails:
+                    emails.append(email)
+        except Exception as e:
+            logger.debug(f"Errore estrazione email con pattern {pattern}: {e}")
+    
+    return emails
+
+
+def _extract_emails_from_website(url: str, timeout: int = 10) -> List[str]:
+    """Estrae email da un sito web tramite HTTP request."""
+    if not url:
+        return []
+    
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=timeout)
+        if response.status_code == 200:
+            text = response.text
+            return _extract_emails_from_text(text)
+    except Exception as e:
+        logger.debug(f"Errore download sito {url}: {e}")
+    
+    return []
+
+
+def _filter_valid_emails(emails: List[str]) -> List[str]:
+    """Filtra email valide escludendo domini ignorati e pattern indesiderati."""
+    from .email_utils import filter_valid_emails
+    return filter_valid_emails(emails)
+
+
+def _is_big_company(name: str) -> bool:
+    """Check if company name contains big company keywords."""
+    from .email_utils import is_big_company
+    return is_big_company(name)
+
+
+def _get_industry_keywords(industry: str) -> List[str]:
+    """Get keywords for a specific industry."""
+    # Local implementation - return empty list as we use the analyzer directly
+    return []
+
+
 def search_contractors(
     comune: str,
     keywords: List[str],
@@ -157,7 +268,33 @@ def search_contractors(
     lang: str = "en",
     state: str = "",
     stop_event: Optional[threading.Event] = None,
+    industry: Optional[str] = None,
+    enable_email_extraction: bool = True,
+    enable_relevance_analysis: bool = True,
+    enable_admin_search: bool = False,
 ) -> List[Dict[str, Any]]:
+    """
+    Enhanced search_contractors with email extraction, relevance analysis, and admin search.
+    
+    Args:
+        comune: City/comune to search
+        keywords: List of keywords to search for
+        debug_screenshot: Enable debug screenshots
+        min_reviews: Minimum number of reviews
+        max_reviews: Maximum number of reviews
+        check_website_alive: Check if website is alive
+        headless: Run browser in headless mode
+        scroll_times: Number of scroll attempts
+        max_results: Maximum results per search
+        output_csv: Output CSV file path
+        lang: Language (en/it)
+        state: State/region
+        stop_event: Event to stop processing
+        industry: Industry for relevance analysis
+        enable_email_extraction: Enable email extraction from websites
+        enable_relevance_analysis: Enable website relevance analysis
+        enable_admin_search: Enable admin name search via DeepSeek
+    """
     already_seen: set = set()
     if output_csv:
         already_seen = _load_already_scraped(output_csv)
@@ -241,11 +378,72 @@ def search_contractors(
                 f"?hl={lang}"
             )
 
+        # Skip big companies
+        if _is_big_company(nome):
+            logger.info(f"[Filter] Saltata grande impresa: {nome}")
+            continue
+
+        # Clean address and phone
+        r["indirizzo"] = clean_extracted_text(r.get("indirizzo", ""))
+        r["telefono"] = clean_extracted_text(r.get("telefono", ""))
+
+        # Initialize extended fields
+        r["email"] = ""
+        r["linkedin"] = ""
+        r["pertinenza"] = False
+        r["categoria"] = "Sconosciuto"
+        r["confidenza_analisi"] = 0.0
+        r["contatto"] = ""
+        r["industry"] = industry or ""
+
+        # Extract emails if enabled
+        if enable_email_extraction and website and status["ok"]:
+            try:
+                emails = _extract_emails_from_website(website)
+                filtered_emails = _filter_valid_emails(emails)
+                if filtered_emails:
+                    r["email"] = ", ".join(filtered_emails)
+                    logger.info(f"[Email] Trovate {len(filtered_emails)} email valide per {nome}")
+            except Exception as e:
+                logger.debug(f"[Email] Errore estrazione email per {nome}: {e}")
+
+        # Analyze website relevance if enabled
+        if enable_relevance_analysis and website and status["ok"]:
+            try:
+                analyzer = WebsiteRelevanceAnalyzer(industry=industry or "fotovoltaico")
+                analysis = analyzer.analyze_website_relevance(website)
+                r["pertinenza"] = analysis.get("is_relevant", False)
+                r["categoria"] = analysis.get("category", "Sconosciuto")
+                r["confidenza_analisi"] = analysis.get("confidence", 0.0)
+                logger.info(f"[Relevance] {nome}: pertinenza={r['pertinenza']}, categoria={r['categoria']}")
+            except Exception as e:
+                logger.debug(f"[Relevance] Errore analisi pertinenza per {nome}: {e}")
+
+        # Search for admin if enabled
+        if enable_admin_search and nome:
+            try:
+                query = f"{nome} amministratore"
+                ddg_results = ddg_search_improved(query, max_results=5)
+                if ddg_results:
+                    payload = f"AZIENDA: {nome}\nQUERY: {query}\n\nRISULTATI (DuckDuckGo):\n"
+                    for i, item in enumerate(ddg_results[:5], 1):
+                        payload += f"\n[{i}] TITOLO: {item.get('title', '')}\n[{i}] SNIPPET: {item.get('snippet', '')}\n[{i}] URL: {item.get('url', '')}"
+                    
+                    admin_name = extract_admin_with_deepseek(payload)
+                    if admin_name:
+                        r["contatto"] = admin_name
+                        logger.info(f"[Admin] Amministratore trovato: {admin_name}")
+            except Exception as e:
+                logger.debug(f"[Admin] Errore ricerca admin per {nome}: {e}")
+
         filtered.append(r)
         already_seen.add(key)
 
         if output_csv:
-            _append_lead_to_csv(output_csv, r)
+            if enable_email_extraction or enable_relevance_analysis or enable_admin_search:
+                _append_lead_to_extended_csv(output_csv, r)
+            else:
+                _append_lead_to_csv(output_csv, r)
             logger.info(f"[Salvataggio] Lead salvato: {nome} (ha_sito_web={status['ok']}, reason={status['reason']})")
 
     return filtered
