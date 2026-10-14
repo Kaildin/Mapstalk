@@ -46,6 +46,7 @@ class AnalysisResult:
     url: str
     is_relevant: bool
     category: str
+    category_id: Optional[int] = None
     confidence: float
     analysis_text: Optional[str] = None
     error: Optional[str] = None
@@ -447,10 +448,22 @@ Rispondi SOLO in formato JSON."""
                     error="Failed to analyze content"
                 )
             
+            # Validate category with CategoryManager
+            category_name = analysis.get('category', 'Sconosciuto')
+            category_id = None
+            try:
+                from .category_manager import category_manager
+                is_valid, cat_id = category_manager.validate(category_name, lang=self.language)
+                if is_valid:
+                    category_id = cat_id
+            except Exception:
+                pass  # CategoryManager not available, continue without ID
+            
             return AnalysisResult(
                 url=url,
                 is_relevant=analysis.get('is_relevant', False),
-                category=analysis.get('category', 'Sconosciuto'),
+                category=category_name,
+                category_id=category_id,
                 confidence=float(analysis.get('confidence', 0.0)),
                 analysis_text=analysis.get('reasoning'),
                 tokens_used=analysis.get('tokens_used')
@@ -462,6 +475,7 @@ Rispondi SOLO in formato JSON."""
                 url=url,
                 is_relevant=False,
                 category="Sconosciuto",
+                category_id=None,
                 confidence=0.0,
                 error=str(e)
             )
@@ -502,6 +516,7 @@ Rispondi SOLO in formato JSON."""
                     url="unknown",
                     is_relevant=False,
                     category="Sconosciuto",
+                    category_id=None,
                     confidence=0.0,
                     error=str(result)
                 ))

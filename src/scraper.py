@@ -45,6 +45,7 @@ EXTENDED_CSV_FIELDNAMES = CSV_FIELDNAMES + [
     "linkedin", 
     "pertinenza",
     "categoria",
+    "categoria_id",
     "confidenza_analisi",
     "contatto",
     "industry",
@@ -392,6 +393,7 @@ def search_contractors(
         r["linkedin"] = ""
         r["pertinenza"] = False
         r["categoria"] = "Sconosciuto"
+        r["categoria_id"] = None
         r["confidenza_analisi"] = 0.0
         r["contatto"] = ""
         r["industry"] = industry or ""
@@ -410,12 +412,16 @@ def search_contractors(
         # Analyze website relevance if enabled
         if enable_relevance_analysis and website and status["ok"]:
             try:
-                analyzer = WebsiteRelevanceAnalyzer(industry=industry or "fotovoltaico")
+                analyzer = WebsiteRelevanceAnalyzer(
+                    industry=industry or "fotovoltaico",
+                    language=lang
+                )
                 analysis = analyzer.analyze_website_relevance(website)
-                r["pertinenza"] = analysis.get("is_relevant", False)
-                r["categoria"] = analysis.get("category", "Sconosciuto")
-                r["confidenza_analisi"] = analysis.get("confidence", 0.0)
-                logger.info(f"[Relevance] {nome}: pertinenza={r['pertinenza']}, categoria={r['categoria']}")
+                r["pertinenza"] = analysis.is_relevant if hasattr(analysis, 'is_relevant') else analysis.get("is_relevant", False)
+                r["categoria"] = analysis.category if hasattr(analysis, 'category') else analysis.get("category", "Sconosciuto")
+                r["categoria_id"] = analysis.category_id if hasattr(analysis, 'category_id') else None
+                r["confidenza_analisi"] = analysis.confidence if hasattr(analysis, 'confidence') else analysis.get("confidence", 0.0)
+                logger.info(f"[Relevance] {nome}: pertinenza={r['pertinenza']}, categoria={r['categoria']}, categoria_id={r['categoria_id']}")
             except Exception as e:
                 logger.debug(f"[Relevance] Errore analisi pertinenza per {nome}: {e}")
 
