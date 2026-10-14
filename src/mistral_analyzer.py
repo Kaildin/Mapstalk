@@ -46,8 +46,8 @@ class AnalysisResult:
     url: str
     is_relevant: bool
     category: str
-    category_id: Optional[int] = None
     confidence: float
+    category_id: Optional[int] = None
     analysis_text: Optional[str] = None
     error: Optional[str] = None
     tokens_used: Optional[int] = None
@@ -80,43 +80,13 @@ class MistralWebsiteAnalyzer:
         "open-mixtral-8x7b", # Open source, better quality
     ]
     
-    # Default system prompt for relevance analysis (in Italian)
-    DEFAULT_SYSTEM_PROMPT_IT = """Sei un esperto analista di mercato. Il tuo compito è valutare 
-se il contenuto di un sito web è pertinente a una specifica nicchia di mercato.
+    # Default system prompt for relevance analysis (in Italian) - Ottimizzato per ridurre tokens
+    DEFAULT_SYSTEM_PROMPT_IT = """Sei un analista. Valuta se il testo è rilevante per la nicchia specificata.
+Rispondi SOLO in JSON: {"is_relevant": true/false, "category": "nome o Sconosciuto", "confidence": 0.0-1.0}"""
 
-Analizza il seguente contenuto HTML e rispondi SOLO in formato JSON con questa struttura:
-{
-    "is_relevant": true/false,
-    "category": "nome della categoria rilevata o 'Sconosciuto'",
-    "confidence": 0.0-1.0,
-    "reasoning": "spiegazione breve in italiano"
-}
-
-Regole:
-- "is_relevant" deve essere true solo se il sito tratta esplicitamente della nicchia specificata
-- "confidence" deve essere un valore numerico tra 0 e 1
-- "category" deve essere una singola parola o frase corta
-- Non inventare informazioni non presenti nel contenuto
-- Se il contenuto è scarsamente rilevante o generico, imposta is_relevant a false"""
-
-    # Default system prompt for relevance analysis (in English)
-    DEFAULT_SYSTEM_PROMPT_EN = """You are a market analysis expert. Your task is to evaluate 
-whether a website's content is relevant to a specific market niche.
-
-Analyze the following HTML content and respond ONLY in JSON format with this structure:
-{
-    "is_relevant": true/false,
-    "category": "detected category name or 'Unknown'",
-    "confidence": 0.0-1.0,
-    "reasoning": "brief explanation in English"
-}
-
-Rules:
-- "is_relevant" should be true only if the site explicitly deals with the specified niche
-- "confidence" must be a numeric value between 0 and 1
-- "category" should be a single word or short phrase
-- Do not invent information not present in the content
-- If content is barely relevant or generic, set is_relevant to false"""
+    # Default system prompt for relevance analysis (in English) - Ottimizzato per ridurre tokens
+    DEFAULT_SYSTEM_PROMPT_EN = """You are an analyst. Evaluate if the text is relevant to the specified niche.
+Respond ONLY in JSON: {"is_relevant": true/false, "category": "name or Unknown", "confidence": 0.0-1.0}"""
     
     # HTML tags to remove for cleaner analysis
     HTML_TAGS_TO_REMOVE = [
@@ -165,7 +135,7 @@ Rules:
         api_key: str,
         industry: str = "fotovoltaico",
         model: str = "mistral-tiny",
-        max_content_length: int = 15000,
+        max_content_length: int = 5000,
         timeout: int = 30,
         max_retries: int = 3,
         rate_limit_delay: float = 0.1,
@@ -207,20 +177,26 @@ Rules:
         logger.info(f"Language: {language}")
     
     def _clean_html(self, html: str) -> str:
-        """Remove unwanted HTML tags and clean content."""
+        """Remove unwanted HTML tags and clean content. Uses html2text for better extraction."""
         if not html:
             return ""
         
-        text = html
+        try:
+            import html2text
+            h = html2text.HTML2Text()
+            h.ignore_links = True
+            h.ignore_images = True
+            h.ignore_emphasis = True
+            text = h.handle(html)
+        except ImportError:
+            # Fallback to regex if html2text not available
+            text = html
+            for pattern in self.HTML_TAGS_TO_REMOVE:
+                text = re.sub(pattern, " ", text, flags=re.DOTALL | re.IGNORECASE)
+            text = re.sub(r'<[^>]+>', ' ', text)
+            text = re.sub(r'\s+', ' ', text)
         
-        # Remove script, style, and other unwanted tags
-        for pattern in self.HTML_TAGS_TO_REMOVE:
-            text = re.sub(pattern, " ", text, flags=re.DOTALL | re.IGNORECASE)
-        
-        # Replace multiple spaces and newlines
-        text = re.sub(r'\s+', ' ', text)
         text = text.strip()
-        
         return text
     
     def _extract_main_content(self, html: str) -> str:
