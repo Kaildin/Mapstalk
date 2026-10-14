@@ -46,7 +46,7 @@ class AnalysisResult:
     url: str
     is_relevant: bool
     category: str
-    confidence: float
+    confidence: float = 0.0
     category_id: Optional[int] = None
     analysis_text: Optional[str] = None
     error: Optional[str] = None
