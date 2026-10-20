@@ -276,9 +276,8 @@ def _extract_emails_from_website(url: str, timeout: int = 10) -> List[str]:
 
         # Add conventional contact paths even when the homepage has no visible link.
         origin = f"{urlparse(homepage_url).scheme}://{urlparse(homepage_url).netloc}"
-        base_path = urlparse(homepage_url).path.rstrip("/")
         for path in ("/contatti", "/contact", "/contacts", "/contact-us", "/contattaci"):
-            candidate = normalized_page_url(urljoin(origin, base_path + path))
+            candidate = normalized_page_url(urljoin(origin, path))
             if candidate and (urlparse(candidate).hostname or "").lower() == homepage_host:
                 queue.append(candidate)
 
