@@ -59,6 +59,11 @@ FAKE_EMAIL_DOMAINS = {
     'demo.com', 'demo.it',
     'placeholder.com', 'fake.com', 'dummy.com', 'lorem.com',
     'abc.com', 'xyz.com', '123.com',
+    # Aggiunti domini placeholder specifici segnalati
+    'email.com', 'email.it', 'mailservice.com', 'mysite.com', 'website.com',
+    'yourcompany.example.com', 'yourwebsite.com', 'esempio-email.it',
+    'myftpupload.com', 'readymag.com', 'cherne.net', 'hervieu.me',
+    '4k6.cce.myftpupload.com', 'nidoma.com', 'guest.it',
 }
 
 # Category 4: Placeholder local parts
@@ -106,6 +111,8 @@ THIRD_PARTY_DOMAINS = {
     
     # Altro
     'paypal.com', 'stripe.com', 'amazonaws.com',
+    # Aggiunti developer/third-party emails specifici
+    'cherne.net', 'hervieu.me', 'readymag.com', 'nidoma.com',
 }
 
 # Category 7: Typo patterns (common mistakes)
@@ -298,40 +305,30 @@ def extract_emails_from_website(url: str, timeout: int = 10) -> List[str]:
     return []
 
 
-def filter_valid_emails(emails: List[str]) -> List[str]:
-    """Filter valid emails excluding ignored domains and unwanted patterns."""
-    valid_emails = []
+def filter_valid_emails(emails: List[str], include_existing_filters: bool = True) -> List[str]:
+    """Filter valid emails excluding ignored domains and unwanted patterns.
     
-    for email in emails:
-        if not email or '@' not in email:
-            continue
-        
-        try:
-            domain = email.split('@')[1].lower()
-            local_part = email.split('@')[0].lower()
-            
-            # Check ignored domains
-            if domain in IGNORED_EMAIL_DOMAINS:
-                logger.debug(f"Email skipped - ignored domain: {email}")
-                continue
-            
-            # Check local part patterns
-            if any(pattern.match(local_part) for pattern in LOCAL_PART_IGNORE_PATTERNS):
-                logger.debug(f"Email skipped - local part pattern: {email}")
-                continue
-            
-            # Check for disposable email domains
-            disposable_domains = ['mailinator.com', 'tempmail.com', 'guerrillamail.com',
-                                  '10minutemail.com', 'throwawaymail.com', 'fakeinbox.com']
-            if domain in disposable_domains:
-                logger.debug(f"Email skipped - disposable domain: {email}")
-                continue
-            
-            valid_emails.append(email)
-        except Exception:
-            continue
+    This function now uses the advanced cleaning system to handle all 9 categories of dirt.
+    It will:
+    1. Remove mailto: prefix
+    2. Filter image assets (@2x, @3x, etc.)
+    3. Filter tracking IDs (Sentry, Wix, etc.)
+    4. Filter placeholder/fake emails
+    5. Clean URL/Unicode encoding
+    6. Filter third-party vendor emails
+    7. Fix common typos
+    8. Deduplicate globally
+    9. Filter mass dumps
     
-    return valid_emails
+    Args:
+        emails: List of email strings to filter
+        include_existing_filters: If True, also apply IGNORED_EMAIL_DOMAINS and LOCAL_PART_IGNORE_PATTERNS
+    """
+    if not emails:
+        return []
+    
+    # Use the advanced cleaning system
+    return clean_email_list(emails, include_existing_filters=include_existing_filters)
 
 
 # ---------------------------------------------------------------------------
@@ -530,6 +527,20 @@ def _clean_single_email_part(part: str) -> str:
     
     # Pattern: numero + spazio + lettera + @ -> rimuovi numero e spazio
     part = re.sub(r'(\d+)\s+([a-zA-Z]+@)', r'\2', part)
+    
+    # Gestione specifica per "20info@" -> "info@" (20 come prefisso numerico prima di local part valida)
+    # Questo si verifica quando lo scraper ha catturato "mailto:20info@..." senza spazio
+    # Controlla se la local part inizia con un numero e contiene un pattern valido
+    if re.match(r'^\d+([a-zA-Z]+)@', part):
+        # Estrai la parte alfabetica
+        match = re.match(r'^\d+([a-zA-Z]+)@(.+)$', part)
+        if match:
+            local_part = match.group(1)
+            domain = match.group(2)
+            # Se la local part è valida (info, support, contact, etc.), rimuovi il prefisso numerico
+            valid_local_parts = ['info', 'support', 'contact', 'admin', 'sales', 'hello', 'lodi', 'segreteria', 'amministrazione', 'commerciale', 'preventivi']
+            if local_part.lower() in valid_local_parts:
+                part = f"{local_part}@{domain}"
     
     # Strip
     return part.strip()
