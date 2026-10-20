@@ -199,7 +199,7 @@ def build_search_urls(
 def _extract_emails_from_text(text: str) -> List[str]:
     """Estrae email da testo usando regex patterns e pulizia avanzata."""
     from .email_utils import extract_emails_from_text
-    return extract_emails_from_text(text, include_existing_filters=True)
+    return extract_emails_from_text(text, include_existing_filters=False)
 
 
 def _extract_emails_from_website(url: str, timeout: int = 10) -> List[str]:
