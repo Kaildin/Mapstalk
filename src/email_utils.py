@@ -133,13 +133,24 @@ def extract_emails_from_text(text: str) -> List[str]:
     if not text:
         return emails
     
-    for pattern in EMAIL_PATTERNS:
+    # Pattern migliorato che cattura anche mailto:
+    patterns = [
+        r'mailto:[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b',
+        r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b',
+    ]
+    
+    for pattern in patterns:
         try:
             matches = re.findall(pattern, text, re.IGNORECASE)
             for match in matches:
-                email = match.strip().lower()
+                # Rimuovi mailto:
+                email = re.sub(r'^mailto:', '', match, flags=re.IGNORECASE).strip().lower()
                 if email and '@' in email and email not in emails:
-                    emails.append(email)
+                    # Filtro rapido: escludi TLD di file
+                    domain = email.split('@')[1]
+                    tld = domain.split('.')[-1]
+                    if tld not in ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'pdf', 'doc', 'xls']:
+                        emails.append(email)
         except Exception as e:
             logger.debug(f"Error extracting emails with pattern {pattern}: {e}")
     
