@@ -13,10 +13,12 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout,
     QLabel, QLineEdit, QCheckBox, QComboBox, QSpinBox,
     QDoubleSpinBox, QPushButton, QTextEdit, QFileDialog,
-    QGroupBox, QScrollArea, QSizePolicy, QFrame,
+    QGroupBox, QScrollArea, QSizePolicy, QFrame, QListWidget,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QProcess
-from PyQt5.QtGui import QFont, QTextCursor, QColor, QPalette
+from PyQt5.QtGui import QFont, QTextCursor, QColor, QPalette, QCompleter
+
+from src.niches import NICHES
 
 # ── colour palette ───────────────────────────────────────────────
 BG       = "#1e1e1e"
@@ -124,24 +126,7 @@ QFrame#sep {{
 }}
 """
 
-NICHES = [
-    "Imbianchino / Pittore edile",
-    "Idraulico / Termoidraulico",
-    "Elettricista",
-    "Toelettatore",
-    "Giardiniere",
-    "Falegname",
-    "Piastrellista",
-    "Muratore / Ristrutturazioni",
-    "Fabbro",
-    "Carrozziere",
-    "Fotovoltaico / Impianti solari",
-    "Plumber",
-    "Dog Groomer",
-    "Phone Repair",
-    "Auto Detailer",
-    "Landscaper",
-]
+# Niche labels are loaded from src.niches so the GUI stays in sync with the CLI.
 
 
 # ── subprocess runner ────────────────────────────────────────────
@@ -174,20 +159,97 @@ class Runner(QThread):
 
 # ── niche checkbox grid ──────────────────────────────────────────
 class NicheSelector(QGroupBox):
+    """Searchable multi-select niche picker, populated from src.niches."""
+
     def __init__(self):
         super().__init__("Niches / Nicchie")
-        grid = QGridLayout()
-        grid.setSpacing(4)
-        self.boxes = {}
-        cols = 3
-        for i, n in enumerate(NICHES):
-            cb = QCheckBox(n)
-            grid.addWidget(cb, i // cols, i % cols)
-            self.boxes[n] = cb
-        self.setLayout(grid)
+
+        layout = QVBoxLayout()
+        layout.setSpacing(6)
+
+        self.search = QComboBox()
+        self.search.setEditable(True)
+        self.search.setInsertPolicy(QComboBox.NoInsert)
+        self.search.setMinimumWidth(220)
+        self.search.setPlaceholderText("Cerca una nicchia...")
+        self.search.setToolTip(
+            "Inizia a digitare per filtrare le nicchie. "
+            "Seleziona un risultato o premi Aggiungi."
+        )
+
+        self.niche_labels = [label for label, _keywords in NICHES]
+        self.search.addItems(self.niche_labels)
+
+        completer = QCompleter(self.niche_labels, self.search)
+        completer.setCaseSensitivity(Qt.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchContains)
+        completer.setCompletionMode(QCompleter.PopupCompletion)
+        self.search.setCompleter(completer)
+
+        add_row = QHBoxLayout()
+        add_row.addWidget(self.search, 1)
+        self.btn_add = QPushButton("Aggiungi")
+        self.btn_add.setMinimumWidth(85)
+        add_row.addWidget(self.btn_add)
+
+        self.selected_list = QListWidget()
+        self.selected_list.setMinimumHeight(130)
+        self.selected_list.setToolTip("Nicchie selezionate per questa esecuzione.")
+
+        remove_row = QHBoxLayout()
+        self.btn_remove = QPushButton("Rimuovi selezionata")
+        self.btn_clear = QPushButton("Svuota")
+        remove_row.addWidget(self.btn_remove)
+        remove_row.addWidget(self.btn_clear)
+
+        layout.addLayout(add_row)
+        layout.addWidget(QLabel("Nicchie selezionate:"))
+        layout.addWidget(self.selected_list, 1)
+        layout.addLayout(remove_row)
+        self.setLayout(layout)
+
+        self.btn_add.clicked.connect(self._add_current)
+        self.search.activated.connect(self._add_current)
+        self.search.lineEdit().returnPressed.connect(self._add_current)
+        self.btn_remove.clicked.connect(self._remove_selected)
+        self.btn_clear.clicked.connect(self.selected_list.clear)
+
+    def _add_current(self, *_args):
+        label = self.search.currentText().strip()
+        if not label:
+            return
+
+        # Match case-insensitively, but pass the canonical CLI label.
+        canonical = next(
+            (item for item in self.niche_labels if item.casefold() == label.casefold()),
+            None,
+        )
+        if canonical is None:
+            # If the typed text is partial, add only when it uniquely identifies a label.
+            matches = [item for item in self.niche_labels if label.casefold() in item.casefold()]
+            if len(matches) == 1:
+                canonical = matches[0]
+            else:
+                return
+
+        existing = {
+            self.selected_list.item(i).text().casefold()
+            for i in range(self.selected_list.count())
+        }
+        if canonical.casefold() not in existing:
+            self.selected_list.addItem(canonical)
+
+        self.search.setEditText("")
+
+    def _remove_selected(self):
+        for item in self.selected_list.selectedItems():
+            self.selected_list.takeItem(self.selected_list.row(item))
 
     def selected(self):
-        return [n for n, cb in self.boxes.items() if cb.isChecked()]
+        return [
+            self.selected_list.item(i).text()
+            for i in range(self.selected_list.count())
+        ]
 
 
 # ── shared params widget ─────────────────────────────────────────
