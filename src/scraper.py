@@ -17,6 +17,7 @@ from .selenium_scraper import scrape_with_selenium
 from .website_checker import get_website_status, website_is_real
 from .driver_utils import cleanup_chrome_tmp
 from .text_utils import clean_extracted_text
+from .dedup_utils import phone_key, load_known_phones
 
 # Define logger BEFORE any try/except that might use it
 logger = logging.getLogger(__name__)
@@ -66,12 +67,12 @@ def _load_geocode_cache() -> dict:
     if path.exists():
         try:
             cache = json.loads(path.read_text(encoding="utf-8"))
-            logger.debug(f"[Geocode] Cache caricata: {len(cache)} citt\u00e0 in cache.")
+            logger.debug(f"[Geocode] Cache caricata: {len(cache)} città in cache.")
             return cache
         except Exception as e:
-            logger.warning(f"[Geocode] Errore lettura cache: {e} \u2014 ricomincio da zero.")
+            logger.warning(f"[Geocode] Errore lettura cache: {e} — ricomincio da zero.")
             return {}
-    logger.debug("[Geocode] Nessuna cache trovata, verr\u00e0 creata al primo geocoding.")
+    logger.debug("[Geocode] Nessuna cache trovata, verrà creata al primo geocoding.")
     return {}
 
 
@@ -88,7 +89,7 @@ def geocode_city(city: str, state: str = "", cache: dict = None) -> tuple:
 
     if key in cache:
         coords = tuple(cache[key])
-        logger.info(f"[Geocode] \u2713 Cache HIT per '{city}' ({state}): {coords}")
+        logger.info(f"[Geocode] ✓ Cache HIT per '{city}' ({state}): {coords}")
         return coords
 
     logger.info(f"[Geocode] Interrogo Nominatim per '{city}' ({state})...")
@@ -100,12 +101,12 @@ def geocode_city(city: str, state: str = "", cache: dict = None) -> tuple:
 
     if location:
         coords = (location.latitude, location.longitude)
-        logger.info(f"[Geocode] \u2713 Trovato: '{city}' ({state}) => {coords} (raw: '{location.address}')")
+        logger.info(f"[Geocode] ✓ Trovato: '{city}' ({state}) => {coords} (raw: '{location.address}')")
         cache[key] = coords
         _save_geocode_cache(cache)
         return coords
 
-    logger.warning(f"[Geocode] \u2717 Nominatim non ha trovato coordinate per '{city}' ({state}). Fallback a URL senza geofencing.")
+    logger.warning(f"[Geocode] ✗ Nominatim non ha trovato coordinate per '{city}' ({state}). Fallback a URL senza geofencing.")
     return (None, None)
 
 
@@ -166,7 +167,7 @@ def build_search_urls(
 ) -> List[Dict[str, str]]:
     search_urls = []
     geocode_cache = _load_geocode_cache()
-    logger.info(f"[Geocode] Inizio geocoding per {len(cities)} citt\u00e0...")
+    logger.info(f"[Geocode] Inizio geocoding per {len(cities)} città...")
 
     for city in cities:
         lat, lng = geocode_city(city, state=state, cache=geocode_cache)
@@ -191,7 +192,7 @@ def build_search_urls(
             })
 
     geo_ok = sum(1 for c in cities if geocode_city(c, state=state, cache=geocode_cache) != (None, None))
-    logger.info(f"[Geocode] Geocoding completato: {geo_ok}/{len(cities)} citt\u00e0 con coordinate.")
+    logger.info(f"[Geocode] Geocoding completato: {geo_ok}/{len(cities)} città con coordinate.")
     return search_urls
 
 
@@ -291,8 +292,10 @@ def search_contractors(
         enable_admin_search: Enable admin name search via DeepSeek
     """
     already_seen: set = set()
+    known_phones: set = set()
     if output_csv:
         already_seen = _load_already_scraped(output_csv)
+        known_phones = load_known_phones(output_csv, lang)
 
     search_urls = build_search_urls([comune], keywords, lang=lang, state=state)
 
@@ -330,6 +333,11 @@ def search_contractors(
         key = (nome.lower(), city_r.lower())
         if key in already_seen:
             logger.info(f"[Resume] Gia' presente, saltato: {nome}")
+            continue
+
+        pk = phone_key(r.get("telefono"), lang)
+        if pk and pk in known_phones:
+            logger.info(f"[Dedup] Telefono gia' presente, saltato: {nome} ({r.get('telefono')})")
             continue
 
         n = r.get("num_recensioni") or 0
@@ -438,6 +446,8 @@ def search_contractors(
 
         filtered.append(r)
         already_seen.add(key)
+        if pk:
+            known_phones.add(pk)
 
         if output_csv:
             if enable_email_extraction or enable_relevance_analysis or enable_admin_search:
