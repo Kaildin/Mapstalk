@@ -53,7 +53,7 @@ BIG_COMPANY_KEYWORDS = [
 
 # Ignored email domains
 IGNORED_EMAIL_DOMAINS = {
-    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "rocketmail.com",
+    "googlemail.com", "yahoo.com", "ymail.com", "rocketmail.com",
     "outlook.com", "hotmail.com", "live.com", "msn.com", "passport.com",
     "icloud.com", "me.com", "mac.com",
     "aol.com", "aim.com", "mail.com", "protonmail.com", "proton.me",
