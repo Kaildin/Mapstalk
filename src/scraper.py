@@ -27,6 +27,8 @@ from .email_utils import (
     IGNORED_EMAIL_DOMAINS,
     LOCAL_PART_IGNORE_PATTERNS,
     WebsiteRelevanceAnalyzer,
+    clean_email_list,
+    clean_email_field,
 )
 from .search_utils import ddg_search_improved, extract_admin_with_deepseek
 
@@ -194,22 +196,9 @@ def build_search_urls(
 
 
 def _extract_emails_from_text(text: str) -> List[str]:
-    """Estrae email da testo usando regex patterns."""
-    emails = []
-    if not text:
-        return emails
-    
-    for pattern in EMAIL_PATTERNS:
-        try:
-            matches = re.findall(pattern, text, re.IGNORECASE)
-            for match in matches:
-                email = match.strip().lower()
-                if email and email not in emails:
-                    emails.append(email)
-        except Exception as e:
-            logger.debug(f"Errore estrazione email con pattern {pattern}: {e}")
-    
-    return emails
+    """Estrae email da testo usando regex patterns e pulizia avanzata."""
+    from .email_utils import extract_emails_from_text
+    return extract_emails_from_text(text, include_existing_filters=True)
 
 
 def _extract_emails_from_website(url: str, timeout: int = 10) -> List[str]:
@@ -238,9 +227,14 @@ def _extract_emails_from_website(url: str, timeout: int = 10) -> List[str]:
 
 
 def _filter_valid_emails(emails: List[str]) -> List[str]:
-    """Filtra email valide escludendo domini ignorati e pattern indesiderati."""
-    from .email_utils import filter_valid_emails
-    return filter_valid_emails(emails)
+    """Filtra email valide usando la pulizia avanzata (tutte e 9 le categorie).
+    
+    NOTE: include_existing_filters=False perché i filtri esistenti (come ignorare
+    local part come 'info', 'contact', ecc.) sono troppo restrittivi per l'estrazione
+    email dal web scraping. Vogliamo mantenere tutte le email valide.
+    """
+    from .email_utils import clean_email_list
+    return clean_email_list(emails, include_existing_filters=False)
 
 
 def _is_big_company(name: str) -> bool:

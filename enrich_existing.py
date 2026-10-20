@@ -31,7 +31,8 @@ from typing import Dict, List, Optional
 # Importa le funzioni di arricchimento locale
 from src.email_utils import (
     extract_emails_from_website,
-    filter_valid_emails,
+    clean_email_list,
+    filter_valid_emails,  # Keep for backward compatibility
     is_big_company,
     WebsiteRelevanceAnalyzer,
 )
@@ -50,7 +51,9 @@ OUTREACH_AVAILABLE = True
 
 # Alias per compatibilita con il codice esistente
 _extract_emails_from_website = extract_emails_from_website
-_filter_valid_emails = filter_valid_emails
+# Usa la nuova funzione di pulizia avanzata (tutte e 9 le categorie)
+# NOTE: include_existing_filters=False perché i filtri esistenti sono troppo restrittivi
+_filter_valid_emails = lambda emails: clean_email_list(emails, include_existing_filters=False)
 _is_big_company = is_big_company
 
 # Configura logging
