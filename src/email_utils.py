@@ -276,8 +276,24 @@ def extract_emails_from_text(text: str, include_existing_filters: bool = True) -
     if not raw_emails:
         return []
     
+    # Log funnel counts without exposing the email addresses themselves.
+    logger.debug(
+        "Email extraction: %d unique raw candidates; include_existing_filters=%s",
+        len(raw_emails),
+        include_existing_filters,
+    )
+
     # Use clean_email_list to handle all 9 categories
-    return clean_email_list(raw_emails, include_existing_filters=include_existing_filters)
+    cleaned_emails = clean_email_list(
+        raw_emails,
+        include_existing_filters=include_existing_filters,
+    )
+    logger.debug(
+        "Email extraction: %d/%d candidates retained after cleaning",
+        len(cleaned_emails),
+        len(raw_emails),
+    )
+    return cleaned_emails
 
 
 def extract_emails_from_website(url: str, timeout: int = 10) -> List[str]:
