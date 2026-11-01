@@ -17,6 +17,7 @@ from .selenium_scraper import scrape_with_selenium
 from .website_checker import get_website_status, website_is_real
 from .driver_utils import cleanup_chrome_tmp
 from .text_utils import clean_extracted_text
+from .dedup_utils import phone_key, load_known_phones
 
 # Define logger BEFORE any try/except that might use it
 logger = logging.getLogger(__name__)
@@ -66,12 +67,12 @@ def _load_geocode_cache() -> dict:
     if path.exists():
         try:
             cache = json.loads(path.read_text(encoding="utf-8"))
-            logger.debug(f"[Geocode] Cache caricata: {len(cache)} citt\u00e0 in cache.")
+            logger.debug(f"[Geocode] Cache caricata: {len(cache)} città in cache.")
             return cache
         except Exception as e:
-            logger.warning(f"[Geocode] Errore lettura cache: {e} \u2014 ricomincio da zero.")
+            logger.warning(f"[Geocode] Errore lettura cache: {e} — ricomincio da zero.")
             return {}
-    logger.debug("[Geocode] Nessuna cache trovata, verr\u00e0 creata al primo geocoding.")
+    logger.debug("[Geocode] Nessuna cache trovata, verrà creata al primo geocoding.")
     return {}
 
 
@@ -88,7 +89,7 @@ def geocode_city(city: str, state: str = "", cache: dict = None) -> tuple:
 
     if key in cache:
         coords = tuple(cache[key])
-        logger.info(f"[Geocode] \u2713 Cache HIT per '{city}' ({state}): {coords}")
+        logger.info(f"[Geocode] ✓ Cache HIT per '{city}' ({state}): {coords}")
         return coords
 
     logger.info(f"[Geocode] Interrogo Nominatim per '{city}' ({state})...")
@@ -100,12 +101,12 @@ def geocode_city(city: str, state: str = "", cache: dict = None) -> tuple:
 
     if location:
         coords = (location.latitude, location.longitude)
-        logger.info(f"[Geocode] \u2713 Trovato: '{city}' ({state}) => {coords} (raw: '{location.address}')")
+        logger.info(f"[Geocode] ✓ Trovato: '{city}' ({state}) => {coords} (raw: '{location.address}')")
         cache[key] = coords
         _save_geocode_cache(cache)
         return coords
 
-    logger.warning(f"[Geocode] \u2717 Nominatim non ha trovato coordinate per '{city}' ({state}). Fallback a URL senza geofencing.")
+    logger.warning(f"[Geocode] ✗ Nominatim non ha trovato coordinate per '{city}' ({state}). Fallback a URL senza geofencing.")
     return (None, None)
 
 
@@ -166,7 +167,7 @@ def build_search_urls(
 ) -> List[Dict[str, str]]:
     search_urls = []
     geocode_cache = _load_geocode_cache()
-    logger.info(f"[Geocode] Inizio geocoding per {len(cities)} citt\u00e0...")
+    logger.info(f"[Geocode] Inizio geocoding per {len(cities)} città...")
 
     for city in cities:
         lat, lng = geocode_city(city, state=state, cache=geocode_cache)
@@ -191,7 +192,7 @@ def build_search_urls(
             })
 
     geo_ok = sum(1 for c in cities if geocode_city(c, state=state, cache=geocode_cache) != (None, None))
-    logger.info(f"[Geocode] Geocoding completato: {geo_ok}/{len(cities)} citt\u00e0 con coordinate.")
+    logger.info(f"[Geocode] Geocoding completato: {geo_ok}/{len(cities)} città con coordinate.")
     return search_urls
 
 
@@ -202,28 +203,125 @@ def _extract_emails_from_text(text: str) -> List[str]:
 
 
 def _extract_emails_from_website(url: str, timeout: int = 10) -> List[str]:
-    """Estrae email da un sito web tramite HTTP request."""
+    """
+    Extract emails from a website's homepage and a small set of likely contact pages.
+
+    Strategy:
+    - Fetch the homepage first.
+    - Queue same-host links whose URL/text suggests a contact page.
+    - Also try common paths (/contatti, /contact, /contacts, /contact-us).
+    - Visit at most 6 pages total, deduplicate URLs and emails, and never crawl
+      external domains. This keeps the extra requests bounded for large batches.
+    """
+    from html import unescape
+    from urllib.parse import urljoin, urldefrag
+
     if not url:
         return []
-    
-    if not url.startswith(('http://', 'https://')):
-        url = 'https://' + url
-    
+
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
     }
-    
+
+    def normalized_page_url(candidate: str) -> Optional[str]:
+        candidate, _ = urldefrag(candidate)
+        parsed = urlparse(candidate)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return None
+        # Ignore non-page links and links with query strings (tracking/form state).
+        if parsed.path.lower().endswith((
+            ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg",
+            ".css", ".js", ".zip", ".doc", ".docx", ".xls", ".xlsx",
+        )):
+            return None
+        return candidate
+
     try:
-        response = requests.get(url, headers=headers, timeout=timeout)
-        if response.status_code == 200:
-            text = response.text
-            return _extract_emails_from_text(text)
-    except Exception as e:
-        logger.debug(f"Errore download sito {url}: {e}")
-    
-    return []
+        home_response = requests.get(url, headers=headers, timeout=timeout)
+        if home_response.status_code != 200:
+            logger.debug("[Email] Homepage non accessibile (%s): %s", home_response.status_code, url)
+            return []
+        homepage_url = home_response.url
+        homepage_host = (urlparse(homepage_url).hostname or "").lower()
+        if not homepage_host:
+            return []
+
+        emails = _extract_emails_from_text(home_response.text)
+        visited = {homepage_url}
+        queue = []
+
+        # Discover contact links from the homepage. Match both URL and nearby anchor text.
+        link_pattern = re.compile(
+            r"""<a\b[^>]*href\s*=\s*(['"])(.*?)\1[^>]*>(.*?)</a\s*>""",
+            re.IGNORECASE | re.DOTALL,
+        )
+        for match in link_pattern.finditer(home_response.text):
+            href = unescape(match.group(2).strip())
+            anchor_text = re.sub(r"<[^>]+>", " ", match.group(3))
+            anchor_text = unescape(anchor_text).lower()
+            link = normalized_page_url(urljoin(homepage_url, href))
+            if not link:
+                continue
+            parsed_link = urlparse(link)
+            if (parsed_link.hostname or "").lower() != homepage_host:
+                continue
+            hint = f"{parsed_link.path.lower()} {anchor_text}"
+            if re.search(r"contatt|contact|get-in-touch|reach-us|chi[-_ ]?siamo|about-us", hint):
+                queue.append(link)
+
+        # Add conventional contact paths even when the homepage has no visible link.
+        origin = f"{urlparse(homepage_url).scheme}://{urlparse(homepage_url).netloc}"
+        for path in ("/contatti", "/contact", "/contacts", "/contact-us", "/contattaci"):
+            candidate = normalized_page_url(urljoin(origin, path))
+            if candidate and (urlparse(candidate).hostname or "").lower() == homepage_host:
+                queue.append(candidate)
+
+        # Preserve order while deduplicating; homepage + at most five contact pages.
+        queue = list(dict.fromkeys(queue))
+        max_contact_pages = 5
+        pages_attempted = 0
+        for page_url in queue:
+            if pages_attempted >= max_contact_pages:
+                break
+            if page_url in visited:
+                continue
+            visited.add(page_url)
+            pages_attempted += 1
+            try:
+                response = requests.get(page_url, headers=headers, timeout=timeout)
+                # Redirects may leave the original site; don't extract from a different host.
+                final_host = (urlparse(response.url).hostname or "").lower()
+                if final_host != homepage_host:
+                    logger.debug("[Email] Skip redirect verso host esterno: %s", page_url)
+                    continue
+                if response.status_code != 200:
+                    logger.debug("[Email] Pagina contatti HTTP %s: %s", response.status_code, page_url)
+                    continue
+                found = _extract_emails_from_text(response.text)
+                before = len(emails)
+                emails.extend(found)
+                logger.debug(
+                    "[Email] Pagina %s: %d email candidate, %d nuove prima della deduplica globale",
+                    page_url, len(found), len(emails) - before,
+                )
+            except requests.RequestException as e:
+                logger.debug("[Email] Errore download pagina %s: %s", page_url, e)
+
+        unique_emails = list(dict.fromkeys(email.lower() for email in emails))
+        logger.debug(
+            "[Email] Crawl completato per %s: %d pagine visitate, %d email uniche candidate",
+            homepage_url, 1 + pages_attempted, len(unique_emails),
+        )
+        return unique_emails
+
+    except requests.RequestException as e:
+        logger.debug("Errore download sito %s: %s", url, e)
+        return []
 
 
 def _filter_valid_emails(emails: List[str]) -> List[str]:
@@ -291,8 +389,10 @@ def search_contractors(
         enable_admin_search: Enable admin name search via DeepSeek
     """
     already_seen: set = set()
+    known_phones: set = set()
     if output_csv:
         already_seen = _load_already_scraped(output_csv)
+        known_phones = load_known_phones(output_csv, lang)
 
     search_urls = build_search_urls([comune], keywords, lang=lang, state=state)
 
@@ -330,6 +430,11 @@ def search_contractors(
         key = (nome.lower(), city_r.lower())
         if key in already_seen:
             logger.info(f"[Resume] Gia' presente, saltato: {nome}")
+            continue
+
+        pk = phone_key(r.get("telefono"), lang)
+        if pk and pk in known_phones:
+            logger.info(f"[Dedup] Telefono gia' presente, saltato: {nome} ({r.get('telefono')})")
             continue
 
         n = r.get("num_recensioni") or 0
@@ -438,6 +543,8 @@ def search_contractors(
 
         filtered.append(r)
         already_seen.add(key)
+        if pk:
+            known_phones.add(pk)
 
         if output_csv:
             if enable_email_extraction or enable_relevance_analysis or enable_admin_search:
