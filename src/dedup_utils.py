@@ -16,11 +16,15 @@ def phone_key(phone, lang: str = "en") -> str:
     toglie il prefisso internazionale (IT: 39 / 0039, US: 1) e restituisce il
     numero nazionale. Ritorna '' se il numero e' troppo corto per essere affidabile.
     """
-    digits = re.sub(r"[^0-9]", "", phone or "")
+    compact = re.sub(r"[^0-9+]", "", phone or "")
+    explicit_italian_prefix = compact.startswith(("+39", "0039"))
+    digits = re.sub(r"[^0-9]", "", compact)
     if digits.startswith("00"):
         digits = digits[2:]
     if lang == "it":
-        if digits.startswith("39") and len(digits) >= 11:
+        # Explicit prefixes also occur on short landlines. Keep an unprefixed
+        # national mobile such as 3912345678 intact.
+        if digits.startswith("39") and (explicit_italian_prefix or len(digits) >= 11):
             digits = digits[2:]
     elif digits.startswith("1") and len(digits) == 11:
         digits = digits[1:]
