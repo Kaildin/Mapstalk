@@ -9,6 +9,7 @@ import urllib.parse
 from typing import List, Dict, Any, Optional, Set
 import logging
 import requests
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
@@ -251,8 +252,7 @@ def extract_emails_from_text(text: str, include_existing_filters: bool = True) -
         text: The text to extract emails from
         include_existing_filters: If True, also apply IGNORED_EMAIL_DOMAINS and LOCAL_PART_IGNORE_PATTERNS
     """
-    if not text:
-        return []
+    text = text or ""
     
     # Pattern che cattura email e mailto:
     patterns = [
@@ -271,10 +271,6 @@ def extract_emails_from_text(text: str, include_existing_filters: bool = True) -
                     raw_emails.append(email)
         except Exception as e:
             logger.debug(f"Error extracting emails with pattern {pattern}: {e}")
-    
-    # Now clean all extracted emails using the advanced cleaner
-    if not raw_emails:
-        return []
     
     # Log funnel counts without exposing the email addresses themselves.
     logger.debug(
@@ -297,28 +293,124 @@ def extract_emails_from_text(text: str, include_existing_filters: bool = True) -
 
 
 def extract_emails_from_website(url: str, timeout: int = 10) -> List[str]:
-    """Extract emails from a website via HTTP request."""
+    """
+    Extract emails from a website's homepage and a small set of likely contact pages.
+
+    Strategy:
+    - Fetch the homepage first.
+    - Queue same-host links whose URL/text suggests a contact page.
+    - Also try common paths (/contatti, /contact, /contacts, /contact-us).
+    - Visit at most 6 pages total, deduplicate URLs and emails, and never crawl
+      external domains. This keeps the extra requests bounded for large batches.
+    """
+    from html import unescape
+    from urllib.parse import urljoin, urldefrag, urlparse
+
     if not url:
         return []
-    
-    if not url.startswith(('http://', 'https://')):
-        url = 'https://' + url
-    
+
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7",
     }
-    
+
+    def normalized_page_url(candidate: str) -> Optional[str]:
+        candidate, _ = urldefrag(candidate)
+        parsed = urlparse(candidate)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return None
+        # Ignore file downloads; keep query strings used by contact-page routes.
+        if parsed.path.lower().endswith((
+            ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg",
+            ".css", ".js", ".zip", ".doc", ".docx", ".xls", ".xlsx",
+        )):
+            return None
+        return candidate
+
     try:
-        response = requests.get(url, headers=headers, timeout=timeout)
-        if response.status_code == 200:
-            text = response.text
-            return extract_emails_from_text(text)
-    except Exception as e:
-        logger.debug(f"Error downloading site {url}: {e}")
-    
-    return []
+        home_response = requests.get(url, headers=headers, timeout=timeout)
+        if home_response.status_code != 200:
+            logger.debug("[Email] Homepage non accessibile (%s): %s", home_response.status_code, url)
+            return []
+        homepage_url = home_response.url
+        homepage_host = (urlparse(homepage_url).hostname or "").lower()
+        if not homepage_host:
+            return []
+
+        emails = extract_emails_from_text(home_response.text, include_existing_filters=False)
+        visited = {homepage_url}
+        queue = []
+
+        # Parse valid HTML with quoted or unquoted hrefs and nested anchor text.
+        for anchor in BeautifulSoup(home_response.text, "html.parser").find_all("a", href=True):
+            href = unescape(anchor["href"].strip())
+            anchor_text = anchor.get_text(" ", strip=True).lower()
+            link = normalized_page_url(urljoin(homepage_url, href))
+            if not link:
+                continue
+            parsed_link = urlparse(link)
+            if (parsed_link.hostname or "").lower() != homepage_host:
+                continue
+            hint = f"{parsed_link.path.lower()} {parsed_link.query.lower()} {anchor_text}"
+            if re.search(r"contatt|contact|get-in-touch|reach-us|chi[-_ ]?siamo|about-us", hint):
+                queue.append(link)
+
+        # Add conventional contact paths even when the homepage has no visible link.
+        origin = f"{urlparse(homepage_url).scheme}://{urlparse(homepage_url).netloc}"
+        for path in ("/contatti", "/contact", "/contacts", "/contact-us", "/contattaci"):
+            candidate = normalized_page_url(urljoin(origin, path))
+            if candidate and (urlparse(candidate).hostname or "").lower() == homepage_host:
+                queue.append(candidate)
+
+        # Preserve order while deduplicating; homepage + at most five contact pages.
+        queue = list(dict.fromkeys(queue))
+        max_contact_pages = 5
+        pages_attempted = 0
+        pages_succeeded = 1
+        seen_emails = {email.lower() for email in emails}
+        for page_url in queue:
+            if pages_attempted >= max_contact_pages:
+                break
+            if page_url in visited:
+                continue
+            visited.add(page_url)
+            pages_attempted += 1
+            try:
+                response = requests.get(page_url, headers=headers, timeout=timeout)
+                # Redirects may leave the original site; don't extract from a different host.
+                final_host = (urlparse(response.url).hostname or "").lower()
+                if final_host != homepage_host:
+                    logger.debug("[Email] Skip redirect verso host esterno: %s", page_url)
+                    continue
+                if response.status_code != 200:
+                    logger.debug("[Email] Pagina contatti HTTP %s: %s", response.status_code, page_url)
+                    continue
+                found = extract_emails_from_text(response.text, include_existing_filters=False)
+                pages_succeeded += 1
+                new_emails = [email for email in found if email.lower() not in seen_emails]
+                emails.extend(new_emails)
+                seen_emails.update(email.lower() for email in new_emails)
+                logger.debug(
+                    "[Email] Pagina %s: %d email pulite, %d nuove email uniche",
+                    page_url, len(found), len(new_emails),
+                )
+            except requests.RequestException as e:
+                logger.debug("[Email] Errore download pagina %s: %s", page_url, e)
+
+        unique_emails = list(dict.fromkeys(email.lower() for email in emails))
+        logger.info(
+            "[Email] Crawl completato per %s: %d pagine tentate, %d riuscite, %d email uniche dopo pulizia",
+            homepage_url, 1 + pages_attempted, pages_succeeded, len(unique_emails),
+        )
+        return unique_emails
+
+    except requests.RequestException as e:
+        logger.debug("Errore download sito %s: %s", url, e)
+        return []
 
 
 def filter_valid_emails(emails: List[str], include_existing_filters: bool = True) -> List[str]:

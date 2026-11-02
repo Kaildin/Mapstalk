@@ -56,15 +56,6 @@ _extract_emails_from_website = extract_emails_from_website
 _filter_valid_emails = lambda emails: clean_email_list(emails, include_existing_filters=False)
 _is_big_company = is_big_company
 
-# Configura logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s | %(levelname)s | %(message)s',
-    handlers=[
-        logging.FileHandler("enrich_existing.log"),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
 
 # Campi aggiuntivi per il CSV arricchito
@@ -117,7 +108,7 @@ def enrich_row(row: Dict, industry: str, skip_admin: bool = False,
     # --- 1. Estrazione email ---
     try:
         emails = extract_emails_from_website(website)
-        filtered_emails = filter_valid_emails(emails)
+        filtered_emails = filter_valid_emails(emails, include_existing_filters=False)
         if filtered_emails:
             row["email"] = ", ".join(filtered_emails)
             logger.info(f"Email trovate per {nome}: {len(filtered_emails)}")
@@ -272,8 +263,15 @@ def main():
                        help='Chiave API Mistral per analisi avanzata (opzionale)')
     parser.add_argument('--use-mistral', action='store_true',
                        help='Usa Mistral API invece dell\'analizzatore locale')
+    parser.add_argument('--log-level', default='INFO',
+                       choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'])
     
     args = parser.parse_args()
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format='%(asctime)s | %(levelname)s | %(message)s',
+        handlers=[logging.FileHandler("enrich_existing.log"), logging.StreamHandler()],
+    )
     
     # Get Mistral API key from argument or environment
     mistral_api_key = args.mistral_api_key or os.getenv('MISTRAL_API_KEY')

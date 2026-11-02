@@ -353,6 +353,32 @@ The repository may contain additional helper modules and data files beyond this 
 - Check --state against the exact state/province values in the file.
 - Review the existing output CSV: resume logic may skip previously processed records or combinations.
 
+## Pipeline regression tests
+
+From the repository root, with the project dependencies installed:
+
+```bash
+python -m pip install pytest
+python -m pytest tests/test_pipeline_regressions.py -v
+python test_phone_dedup.py
+python test_niches.py
+```
+
+The regression tests use a local HTTP server and temporary CSV files. Google Maps
+acquisition and geocoding are replaced with controlled inputs; no browser or API
+credentials are needed. These tests do not certify live Google Maps or API access.
+
+Both new searches and `enrich_existing.py` use the same contact-page crawler,
+limited to the homepage and five additional page attempts. Business addresses
+such as `info@`, `contact@` and `sales@` are retained while asset, tracking,
+placeholder and third-party vendor filters still apply.
+
+At the default `INFO` log level the crawl summary reports attempted pages,
+successful pages and unique cleaned emails. Use `--log-level DEBUG` with
+`run.py`, `run_batch.py` or `enrich_existing.py` for per-page counts and the
+extraction/cleaning funnel, including zero candidates. Relevance-stage failures
+are logged at `WARNING`.
+
 ## Responsible use
 
 Use Mapstalk only in ways that comply with applicable laws, privacy and data-protection requirements, and the terms and access restrictions of the services you use. Collect only information you have a legitimate reason to process, respect opt-outs and deletion requests, and avoid excessive request rates. Public accessibility does not automatically mean information is unrestricted for every use case.
